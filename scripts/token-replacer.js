@@ -1,295 +1,19 @@
-const tr_tokenPathDefault = "modules/token-replacer/tokens/";
-const tr_difficultyNameDefault = "cr";
-const tr_difficultyVariableDefault = "data.details.cr";
-const tr_portraitPrefixDefault = "";
-const tr_useStructureDefault = true;
-const tr_BAD_DIRS = ["[data]", "[data] ", "", null];
-
 let tr_cachedTokens = [];
 let tr_replaceToken;
 let tr_tokenDirectory;
 let tr_difficultyName;
 let tr_difficultyVariable;
 let tr_portraitPrefix;
-let tr_hookedFromTokenCreation = false;
 let tr_imageNameFormat;
 let tr_isTRDebug = false;
 let tr_useStructure = true;
 let tr_nameFormats = [];
 let tr_folderFormats = [];
 
-let selectedFolderFormat;
-let selectedNameFormat;
-
-Handlebars.registerHelper('findSelected', function(elem, list, options) {
-    if (elem) {
-        return elem.find((x) => x.selected).value;
-    }
-    return "|Not Defined|";
-});
-
-// Token Replacer Setup Menu
-class TokenReplacerSetup extends FormApplication {
-    static get defaultOptions() {
-        const options = super.defaultOptions;
-        options.id = "token-replacer-settings";
-        options.template = "modules/token-replacer/handlebars/settings.handlebars";
-        options.width = 500;
-        return options;
-    }    
-  
-    get title() { 
-         "Token Replacer Settings";
-    }
-  
-    /** @override */
-    async getData() {
-        const tokenDir = game.settings.get("token-replacer", "tokenDirectory");
-        const diffName = game.settings.get("token-replacer", "difficultyName");
-        const diffVariable = game.settings.get("token-replacer", "difficultyVariable");
-        const prefix = game.settings.get("token-replacer", "portraitPrefix");
-
-        // file name formats
-        let imgNameFormat = game.settings.get("token-replacer", "imageNameFormat");        
-        if (imgNameFormat === null || imgNameFormat === -1) {
-            imgNameFormat = 0;
-        }
-        if (imgNameFormat !== null && imgNameFormat > -1) {
-            tr_nameFormats[imgNameFormat].selected = true;
-        }
-
-        // folder name formats
-        let folderNameFormat = game.settings.get("token-replacer", "folderNameFormat");        
-        if (folderNameFormat === null || folderNameFormat === -1) {
-            folderNameFormat = 0;
-        }
-        if (folderNameFormat !== null && folderNameFormat > -1) {
-            tr_folderFormats[folderNameFormat].selected = true;
-        }
-
-        const useDefinedStructures = game.settings.get("token-replacer", "structure");
-
-        const dataDirSet = !tr_BAD_DIRS.includes(tokenDir);
-
-        const setupConfig = {
-            "tokenDirectory": tokenDir,
-            "difficultyName": diffName,
-            "difficultyVariable": diffVariable,
-            "portraitPrefix": prefix,
-            "nameFormats": tr_nameFormats,
-            "folderFormats": tr_folderFormats,
-            "useDefinedStructures": useDefinedStructures
-        };
-
-        let diffSpecified = true;
-        if (diffName !== "" && diffVariable === "") {
-            diffSpecified = false;
-        }
-        
-        const setupComplete = dataDirSet && diffSpecified;
-
-        return {
-            setupConfig: setupConfig,
-            setupComplete: setupComplete,
-        };
-    }
-  
-    /** @override */
-    async _updateObject(event, formData) {
-        event.preventDefault();
-
-        const tokenDir = formData['token-directory'];
-        const diffName = formData['difficulty-name'];
-        let diffVariable = formData['difficulty-variable'];
-        const prefix = formData['portrait-prefix'];
-
-        // can’t be const because it’s overwritten for debug logging
-        let imageNameFormat = formData['image-name-format'];
-        const imageNameIdx = tr_nameFormats.findIndex(x => x.value === imageNameFormat);
-        tr_nameFormats.forEach((x) => {
-            x.selected = false;
-        });
-        if (imageNameIdx !== null && imageNameIdx > -1 && tr_nameFormats[imageNameIdx]) {
-            tr_nameFormats[imageNameIdx].selected = true;
-        }
-
-        let folderNameFormat = formData['folder-name-format'];
-        const folderNameIdx = tr_folderFormats.findIndex(x => x.value === folderNameFormat);
-        tr_folderFormats.forEach((x) => {
-            x.selected = false;
-        });
-        if (folderNameIdx !== null && folderNameIdx > -1) {
-            tr_folderFormats[folderNameIdx].selected = true;
-        }
-
-        // if not difficulty name is specified then the variable is not needed
-        if (diffName === "") {
-            diffVariable = "";
-        }
-
-        await game.settings.set("token-replacer", "tokenDirectory", tokenDir);
-        await game.settings.set("token-replacer", "difficultyName", diffName);
-        await game.settings.set("token-replacer", "difficultyVariable", diffVariable);
-        await game.settings.set("token-replacer", "portraitPrefix", prefix);
-        await game.settings.set("token-replacer", "imageNameFormat", imageNameIdx);
-        await game.settings.set("token-replacer", "folderNameFormat", folderNameIdx);
-
-        const isTRDebug = game.settings.get("token-replacer", "debug");
-        if (isTRDebug) {
-            if (folderNameFormat === "proper") {
-                folderNameFormat = " ";
-            }
-            if (imageNameFormat === "proper") {
-                imageNameFormat = " ";
-            }
-            console.log(`Token Replacer: Format Structure Setup: '${tr_tokenDirectory.activeSource}/${tr_tokenDirectory.current}/${diffName}${folderNameFormat}0_25/Monster${imageNameFormat}Name.png'`);
-        }
-
-        const tokenDirSet = !tr_BAD_DIRS.includes(tokenDir);
-
-        if (!tokenDirSet) {
-            $('#setup-feedback').text(`Please set the token directory to something other than the root.`);
-            $('#token-replacer-settings').css("height", "auto");
-            throw new Error(`Please set the token directory to something other than the root.`);
-        } else if (diffName !== "" && diffVariable === "") {
-            $('#setup-feedback').text(`If there is a 'Difficulty Name', you NEED to specify the 'Difficulty Variable'.`);
-            $('#ddb-importer-settings').css("height", "auto");
-            throw new Error(`If there is a 'Difficulty Name', you NEED to specify the 'Difficulty Variable'.`);
-        } else {
-            // recache the tokens
-            tokenReplacerCacheAvailableFiles();
-        }
-    }
-}
-
-// Directory Picker
-class DirectoryPicker extends FilePicker {
-    constructor(options = {}) {
-      super(options);
-    }
-  
-    _onSubmit(event) {
-        event.preventDefault();
-        const path = event.target.target.value;
-        const activeSource = this.activeSource;
-        const bucket = event.target.bucket ? event.target.bucket.value : null;
-        this.field.value = DirectoryPicker.format({
-        activeSource,
-        bucket,
-        path,
-        });
-        this.close();
-    }
-  
-    static async uploadToPath(path, file) {
-        const options = DirectoryPicker.parse(path);
-        return FilePicker.upload(options.activeSource, options.current, file, { bucket: options.bucket });
-    }
-  
-    // returns the type "Directory" for rendering the SettingsConfig
-    static Directory(val) {
-        return val;
-    }
-  
-    // formats the data into a string for saving it as a GameSetting
-    static format(value) {
-        return value.bucket !== null
-        ? `[${value.activeSource}:${value.bucket}] ${value.path}`
-        : `[${value.activeSource}] ${value.path}`;
-    }
-  
-    // parses the string back to something the FilePicker can understand as an option
-    static parse(str) {
-        let matches = str.match(/\[(.+)\]\s*(.+)/);
-        if (matches) {
-        let source = matches[1];
-        const current = matches[2].trim();
-        const [s3, bucket] = source.split(":");
-        if (bucket !== undefined) {
-            return {
-            activeSource: s3,
-            bucket: bucket,
-            current: current,
-            };
-        } else {
-            return {
-            activeSource: s3,
-            bucket: null,
-            current: current,
-            };
-        }
-        }
-        // failsave, try it at least
-        return {
-        activeSource: "data",
-        bucket: null,
-        current: str,
-        };
-    }
-  
-    // Adds a FilePicker-Simulator-Button next to the input fields
-    static processHtml(html) {
-        $(html)
-        .find(`input[data-dtype="Directory"]`)
-        .each((index, element) => {
-            // disable the input field raw editing
-            $(element).prop("readonly", true);
-
-            // if there is no button next to this input element yet, we add it
-            if (!$(element).next().length) {
-            let picker = new DirectoryPicker({
-                field: $(element)[0],
-                ...DirectoryPicker.parse($(element).val()),
-            });
-            let pickerButton = $(
-                '<button type="button" class="file-picker" data-type="imagevideo" data-target="img" title="Pick directory"><i class="fas fa-file-import fa-fw"></i></button>'
-            );
-            pickerButton.on("click", () => {
-                picker.render(true);
-            });
-            $(element).parent().append(pickerButton);
-            }
-        });
-    }
-  
-    /** @override */
-    activateListeners(html) {
-        super.activateListeners(html);
-
-        // remove unnecessary elements
-        $(html).find("ol.files-list").remove();
-        $(html).find("footer div").remove();
-        $(html).find("footer button").text("Select Directory");
-    }
-}
-
-// Token Config
-const TokenReplacerDisabler = {
-    getReplacerDisabled: function(token) {
-        return token.getFlag('token-replacer', 'disabled');
-    },
-
-    onConfigRender: function(config, html) {
-		const disabled = TokenReplacerDisabler.getReplacerDisabled(config.token);
-		const imageTab = html.find('.tab[data-tab="image"]');
-
-		imageTab.append($(`
-			<fieldset class="token-replacer">
-				<legend>${game.i18n.localize('TR.TokenConfig.Heading')}</legend>
-                <label class="checkbox">
-                    <input type="checkbox" name="flags.token-replacer.disabled"
-                            ${disabled ? 'checked' : ''}>
-                    ${game.i18n.localize('TR.TokenConfig.Disable')}
-                </label>			
-			</fieldset>
-		`));
-	}
-}
-Hooks.on("renderTokenConfig", TokenReplacerDisabler.onConfigRender);
-
-function folderSelected(selected) {
-    selectedFolderFormat = selected.value;
-}
+import {tr_tokenPathDefault, tr_difficultyNameDefault, tr_difficultyVariableDefault, tr_portraitPrefixDefault, tr_useStructureDefault, tr_BAD_DIRS} from 'defaults.js';
+import {TokenReplacerSetup} from 'setup.js';
+import {DirectoryPicker} from 'directory-picker.js';
+import {TokenReplacerDisabler} from 'disabler.js';
 
 const TokenReplacer = {
     grabSavedSettings() {
@@ -342,7 +66,6 @@ const TokenReplacer = {
     preCreateActorHook(document, options, userId) {
         // grab the saved values
         TokenReplacer.grabSavedSettings();
-        tr_hookedFromTokenCreation = false;
 
         if (tr_isTRDebug) {
             console.log(`Token Replacer: preCreateActorHook: Data:`, document);
@@ -366,7 +89,6 @@ const TokenReplacer = {
     createActorHook(document, options, userId) {
         // grab the saved values
         TokenReplacer.grabSavedSettings();
-        tr_hookedFromTokenCreation = false;
 
         if (tr_isTRDebug) {
             console.log(`Token Replacer: createActorHook: Data:`, document);        
@@ -408,7 +130,6 @@ const TokenReplacer = {
             if (tr_isTRDebug) {
                 console.log(`Token Replacer: preCreateTokenHook: Before: PassData:`, actor.data);
             }
-            tr_hookedFromTokenCreation = true;
 
             let hasDifficultProperty = hasProperty(actor.data, tr_difficultyVariable);
             if (!tr_difficultyVariable) {
@@ -538,7 +259,6 @@ const TokenReplacer = {
         return data;
     }
 }
-
 
 // initialisation
 function tokenReplacerInit() {
@@ -747,6 +467,14 @@ function createFolderFormat(selected) {
     }        
 }
 
+Handlebars.registerHelper('findSelected', function(elem, list, options) {
+    if (elem) {
+        return elem.find((x) => x.selected).value;
+    }
+    return "|Not Defined|";
+});
+
+Hooks.on("renderTokenConfig", TokenReplacerDisabler.onConfigRender);
 Hooks.on("renderTokenReplacerSetup", (app, html, user) => {
     DirectoryPicker.processHtml(html);
 });
